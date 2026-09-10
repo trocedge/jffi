@@ -74,3 +74,67 @@ jobs:
           name: jar-${{ matrix.arch }}
           path: archive/*.jar
 
+  # LoongArch64 (loong64) cannot use the qemu+docker approach above: no Docker
+  # Official Image publishes a linux/loong64 variant, and Adoptium/Temurin has no
+  # LoongArch build, so there is neither a LoongArch64 userland nor a LoongArch64
+  # JDK to run `ant` in. The native library is cross-compiled on the x86_64 runner
+  # instead and packaged exactly like the other architectures.
+  #
+  # Kept separate from the matrix job rather than added as another matrix entry:
+  # every entry above means "run that architecture's container under qemu", which
+  # is a different mechanism, and this way those platforms stay untouched.
+  native-loongarch64:
+    name: Linux binary loongarch64
+    runs-on: ubuntu-24.04
+    # jni/GNUmakefile has no notion of a generic cross build, but its Linux branch
+    # already honours these three variables, so no Makefile change is needed:
+    #   CC             the cross compiler (its Linux branch never sets CC)
+    #   CONFIGURE_HOST appends --host=... to libffi's configure. Without it libffi
+    #                  configures for the build machine (x86_64) and we would end
+    #                  up linking LoongArch64 objects against x86_64 ones
+    #   STRIP          defaults to the host strip, which cannot read LoongArch64
+    #                  objects, and runs unconditionally after every link
+    env:
+      CC: loongarch64-linux-gnu-gcc-14
+      CONFIGURE_HOST: loongarch64-linux-gnu
+      STRIP: loongarch64-linux-gnu-strip -S
+    steps:
+      - uses: actions/checkout@v4
+      # Installed before setup-java so the JDK we actually build with is last
+      # onto PATH (the ant package pulls in a JRE of its own).
+      - name: Install LoongArch64 cross toolchain and ant
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            gcc-14-loongarch64-linux-gnu \
+            binutils-loongarch64-linux-gnu \
+            libc6-dev-loong64-cross \
+            make texinfo
+          # Needs to be split, otherwise a newer version of OpenJDK is pulled
+          sudo apt-get install -y --no-install-recommends ant
+      - name: Set up JDK 17 for build
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+      # -Dplatform.cpu/os are command line properties, so the <condition> blocks in
+      # build.xml cannot override them, and Ant forwards CPU=${platform.cpu} to the
+      # Makefile (build.xml:393).
+      - name: Build native library and platform jar
+        run: ant -Dplatform.cpu=loongarch64 -Dplatform.os=Linux jar archive-platform-jar
+      - name: Check the built library is LoongArch64
+        run: |
+          # expects e_machine 258 (EM_LOONGARCH) and e_flags 0x43 (LP64D, object ABI v1),
+          # so that a cross build that silently fell back to the host compiler fails here
+          python3 -c 'import struct,sys;d=open(sys.argv[1],"rb").read(64);m=struct.unpack_from("<H",d,18)[0];f=struct.unpack_from("<I",d,48)[0];print(f"e_machine={m} e_flags=0x{f:x}");sys.exit(0 if m==258 and f&7==3 and (f>>6)&3==1 else 1)' build/jni/libjffi-1.2.so
+      - name: Archive built library
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-object-loongarch64
+          path: build/jni/*.so
+      - name: Archive built jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: jar-loongarch64
+          path: archive/*.jar
+
